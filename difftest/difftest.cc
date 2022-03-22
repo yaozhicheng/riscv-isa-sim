@@ -80,7 +80,7 @@ void sim_t::diff_get_regs(void* diff_context) {
     ctx->gpr[i] = state->XPR[i];
   }
   for (int i = 0; i < NFPR; i++) {
-    ctx->fpr[i] = f128_to_ui64_r_minMag(state->FPR[i], true);
+    ctx->fpr[i] = unboxF64(state->FPR[i]);
   }
   ctx->pc = state->pc;
   ctx->mstatus = state->mstatus->read();
@@ -114,7 +114,7 @@ void sim_t::diff_set_regs(void* diff_context) {
     state->XPR.write(i, (sword_t)ctx->gpr[i]);
   }
   for (int i = 0; i < NFPR; i++) {
-    state->FPR.write(i, ui64_to_f128(ctx->fpr[i]));
+    state->FPR.write(i, freg(f64(ctx->fpr[i])));
   }
   state->pc = ctx->pc;
   state->mstatus->write(ctx->mstatus);
