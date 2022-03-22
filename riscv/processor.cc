@@ -23,34 +23,38 @@
 #undef STATE
 #define STATE state
 
-processor_t::processor_t(const char* isa, const char* priv, const char* varch,
+processor_t::processor_t(isa_parser_t isa, const char* varch,
                          simif_t* sim, uint32_t id, bool halt_on_reset,
                          FILE* log_file, std::ostream& sout_)
-  : debug(false), halt_request(HR_NONE), sim(sim), id(id), xlen(0),
+  : debug(false), halt_request(HR_NONE), isa(isa), sim(sim), id(id), xlen(0),
   histogram_enabled(false), log_commits_enabled(false),
   log_file(log_file), sout_(sout_.rdbuf()), halt_on_reset(halt_on_reset),
-  extension_table(256, false), impl_table(256, false), last_pc(1), executions(1)
+  impl_table(256, false), last_pc(1), executions(1)
 {
   VU.p = this;
 
-  parse_isa_string(isa);
-  parse_priv_string(priv);
+#ifndef __SIZEOF_INT128__
+  if (extension_enabled('V')) {
+    fprintf(stderr, "V extension is not supported on platforms without __int128 type\n");
+    abort();
+  }
+#endif
+
   parse_varch_string(varch);
 
   register_base_instructions();
   mmu = new mmu_t(sim, this);
 
-  disassembler = new disassembler_t(max_xlen);
-  for (auto e : custom_extensions)
-    for (auto disasm_insn : e.second->get_disasms())
-      disassembler->add_insn(disasm_insn);
+  disassembler = new disassembler_t(&isa);
+  for (auto e : isa.get_extensions())
+    register_extension(e.second);
 
   set_pmp_granularity(1 << PMP_SHIFT);
   set_pmp_num(state.max_pmp);
 
-  if (max_xlen == 32)
+  if (isa.get_max_xlen() == 32)
     set_mmu_capability(IMPL_MMU_SV32);
-  else if (max_xlen == 64)
+  else if (isa.get_max_xlen() == 64)
     set_mmu_capability(IMPL_MMU_SV48);
 
   reset();
@@ -117,12 +121,17 @@ static bool check_pow2(int val)
   return ((val & (val - 1))) == 0;
 }
 
+static std::string strtolower(const char* str)
+{
+  std::string res;
+  for (const char *r = str; *r; r++)
+    res += std::tolower(*r);
+  return res;
+}
+
 void processor_t::parse_varch_string(const char* s)
 {
-  std::string str, tmp;
-  for (const char *r = s; *r; r++)
-    str += std::tolower(*r);
-
+  std::string str = strtolower(s);
   size_t pos = 0;
   size_t len = str.length();
   int vlen = 0;
@@ -165,77 +174,62 @@ void processor_t::parse_varch_string(const char* s)
   VU.vstart_alu = vstart_alu;
 }
 
-static std::string strtolower(const char* str)
-{
-  std::string res;
-  for (const char *r = str; *r; r++)
-    res += std::tolower(*r);
-  return res;
-}
-
-void processor_t::parse_priv_string(const char* str)
-{
-  std::string lowercase = strtolower(str);
-  bool user = false, supervisor = false;
-
-  if (lowercase == "m")
-    ;
-  else if (lowercase == "mu")
-    user = true;
-  else if (lowercase == "msu")
-    user = supervisor = true;
-  else
-    bad_priv_string(str);
-
-  if (user) {
-    max_isa |= reg_t(user) << ('u' - 'a');
-    extension_table['U'] = true;
-  }
-
-  if (supervisor) {
-    max_isa |= reg_t(supervisor) << ('s' - 'a');
-    extension_table['S'] = true;
-  }
-}
-
-void processor_t::parse_isa_string(const char* str)
+isa_parser_t::isa_parser_t(const char* str, const char *priv)
+  : extension_table(256, false)
 {
   isa_string = strtolower(str);
-  const char* all_subsets = "imafdqchp"
-#ifdef __SIZEOF_INT128__
-    "v"
-#endif
-    "";
+  const char* all_subsets = "mafdqchpv";
 
   max_isa = reg_t(2) << 62;
+  // enable zicntr and zihpm unconditionally for backward compatibility
+  extension_table[EXT_ZICNTR] = true;
+  extension_table[EXT_ZIHPM] = true;
+
   if (isa_string.compare(0, 4, "rv32") == 0)
     max_xlen = 32, max_isa = reg_t(1) << 30;
   else if (isa_string.compare(0, 4, "rv64") == 0)
     max_xlen = 64;
   else
-    bad_isa_string(str, "Spike supports either RV32I or RV64I");
+    bad_isa_string(str, "ISA strings must begin with RV32 or RV64");
 
-  if (isa_string[4] == 'g') {
-    // G = IMAFD_Zicsr_Zifencei, but Spike includes the latter two
-    // unconditionally, so they need not be explicitly added here.
-    isa_string = isa_string.substr(0, 4) + "imafd" + isa_string.substr(5);
+  switch (isa_string[4]) {
+    case 'g':
+      // G = IMAFD_Zicsr_Zifencei, but Spike includes the latter two
+      // unconditionally, so they need not be explicitly added here.
+      isa_string = isa_string.substr(0, 4) + "imafd" + isa_string.substr(5);
+      // Fall through
+    case 'i':
+      max_isa |= 1L << ('i' - 'a');
+      break;
+
+    case 'e':
+      max_isa |= 1L << ('e' - 'a');
+      break;
+
+    default:
+      bad_isa_string(str, ("'" + isa_string.substr(0, 4) + "' must be followed by I, E, or G").c_str());
   }
 
-  if (isa_string[4] != 'i')
-    bad_isa_string(str, "'I' extension is required");
+  const char* isa_str = isa_string.c_str();
+  auto p = isa_str, subset = all_subsets;
+  for (p += 5; islower(*p) && !strchr("zsx", *p); ++p) {
+    while (*subset && (*p != *subset))
+      ++subset;
 
-  auto p = isa_string.begin();
-  for (p += 4; islower(*p) && !strchr("zsx", *p); ++p) {
-    while (*all_subsets && (*p != *all_subsets))
-      ++all_subsets;
-    if (!*all_subsets)
-      bad_isa_string(str, "Wrong order");
+    if (!*subset) {
+      if (strchr(all_subsets, *p))
+        bad_isa_string(str, ("Extension '" + std::string(1, *p) + "' appears too late in ISA string").c_str());
+      else
+        bad_isa_string(str, ("Unsupported extension '" + std::string(1, *p) + "'").c_str());
+    }
+
     switch (*p) {
       case 'p': extension_table[EXT_ZBPBO] = true;
                 extension_table[EXT_ZPN] = true;
                 extension_table[EXT_ZPSFOPERAND] = true;
                 extension_table[EXT_ZMMUL] = true; break;
       case 'q': max_isa |= 1L << ('d' - 'a');
+                // Fall through
       case 'd': max_isa |= 1L << ('f' - 'a');
     }
     max_isa |= 1L << (*p - 'a');
@@ -252,10 +246,12 @@ void processor_t::parse_isa_string(const char* str)
     auto end = p;
     do ++end; while (*end && *end != '_');
     auto ext_str = std::string(p, end);
-    if (ext_str == "zfh") {
+    if (ext_str == "zfh" || ext_str == "zfhmin") {
       if (!((max_isa >> ('f' - 'a')) & 1))
-        bad_isa_string(str, "'Zfh' extension requires 'F'");
-      extension_table[EXT_ZFH] = true;
+        bad_isa_string(str, ("'" + ext_str + "' extension requires 'F'").c_str());
+      extension_table[EXT_ZFHMIN] = true;
+      if (ext_str == "zfh")
+        extension_table[EXT_ZFH] = true;
     } else if (ext_str == "zicsr") {
       // Spike necessarily has Zicsr, because
       // Zicsr is implied by the privileged architecture
@@ -320,15 +316,49 @@ void processor_t::parse_isa_string(const char* str)
       extension_table[EXT_SVPBMT] = true;
     } else if (ext_str == "svinval") {
       extension_table[EXT_SVINVAL] = true;
+    } else if (ext_str == "zicbom") {
+      extension_table[EXT_ZICBOM] = true;
+    } else if (ext_str == "zicboz") {
+      extension_table[EXT_ZICBOZ] = true;
+    } else if (ext_str == "zicbop") {
+    } else if (ext_str == "zicntr") {
+    } else if (ext_str == "zihpm") {
     } else if (ext_str[0] == 'x') {
       max_isa |= 1L << ('x' - 'a');
       extension_table[toupper('x')] = true;
       if (ext_str == "xbitmanip") {
-        extension_table[EXT_XBITMANIP] = true;
+        extension_table[EXT_XZBP] = true;
+        extension_table[EXT_XZBS] = true;
+        extension_table[EXT_XZBE] = true;
+        extension_table[EXT_XZBF] = true;
+        extension_table[EXT_XZBC] = true;
+        extension_table[EXT_XZBM] = true;
+        extension_table[EXT_XZBR] = true;
+        extension_table[EXT_XZBT] = true;
+      } else if (ext_str == "xzbp") {
+        extension_table[EXT_XZBP] = true;
+      } else if (ext_str == "xzbs") {
+        extension_table[EXT_XZBS] = true;
+      } else if (ext_str == "xzbe") {
+        extension_table[EXT_XZBE] = true;
+      } else if (ext_str == "xzbf") {
+        extension_table[EXT_XZBF] = true;
+      } else if (ext_str == "xzbc") {
+        extension_table[EXT_XZBC] = true;
+      } else if (ext_str == "xzbm") {
+        extension_table[EXT_XZBM] = true;
+      } else if (ext_str == "xzbr") {
+        extension_table[EXT_XZBR] = true;
+      } else if (ext_str == "xzbt") {
+        extension_table[EXT_XZBT] = true;
       } else if (ext_str.size() == 1) {
         bad_isa_string(str, "single 'X' is not a proper name");
       } else if (ext_str != "xdummy") {
-        register_extension(find_extension(ext_str.substr(1).c_str())());
+        extension_t* x = find_extension(ext_str.substr(1).c_str())();
+        if (!extensions.insert(std::make_pair(x->name(), x)).second) {
+          fprintf(stderr, "extensions must have unique names (got two named \"%s\"!)\n", x->name());
+          abort();
+        }
       }
     } else {
       bad_isa_string(str, ("unsupported extension: " + ext_str).c_str());
@@ -336,7 +366,29 @@ void processor_t::parse_isa_string(const char* str)
     p = end;
   }
   if (*p) {
-    bad_isa_string(str, ("can't parse: " + std::string(p, isa_string.end())).c_str());
+    bad_isa_string(str, ("can't parse: " + std::string(p)).c_str());
+  }
+
+  std::string lowercase = strtolower(priv);
+  bool user = false, supervisor = false;
+
+  if (lowercase == "m")
+    ;
+  else if (lowercase == "mu")
+    user = true;
+  else if (lowercase == "msu")
+    user = supervisor = true;
+  else
+    bad_priv_string(priv);
+
+  if (user) {
+    max_isa |= reg_t(user) << ('u' - 'a');
+    extension_table['U'] = true;
+  }
+
+  if (supervisor) {
+    max_isa |= reg_t(supervisor) << ('s' - 'a');
+    extension_table['S'] = true;
   }
 }
 
@@ -359,7 +411,7 @@ void state_t::reset(processor_t* const proc, reg_t max_isa)
 
   // This assumes xlen is always max_xlen, which is true today (see
   // mstatus_csr_t::unlogged_write()):
-  auto xlen = proc->get_max_xlen();
+  auto xlen = proc->get_isa().get_max_xlen();
 
   prv = PRV_M;
   v = false;
@@ -371,16 +423,20 @@ void state_t::reset(processor_t* const proc, reg_t max_isa)
   csrmap[CSR_MSCRATCH] = std::make_shared<basic_csr_t>(proc, CSR_MSCRATCH, 0);
   csrmap[CSR_MTVEC] = mtvec = std::make_shared<tvec_csr_t>(proc, CSR_MTVEC);
   csrmap[CSR_MCAUSE] = mcause = std::make_shared<cause_csr_t>(proc, CSR_MCAUSE);
-  csrmap[CSR_MINSTRET] = minstret = std::make_shared<minstret_csr_t>(proc, CSR_MINSTRET);
-  csrmap[CSR_MCYCLE] = std::make_shared<proxy_csr_t>(proc, CSR_MCYCLE, minstret);
-  csrmap[CSR_INSTRET] = std::make_shared<counter_proxy_csr_t>(proc, CSR_INSTRET, minstret);
-  csrmap[CSR_CYCLE] = std::make_shared<counter_proxy_csr_t>(proc, CSR_CYCLE, minstret);
+  csrmap[CSR_MINSTRET] = minstret = std::make_shared<wide_counter_csr_t>(proc, CSR_MINSTRET);
+  csrmap[CSR_MCYCLE] = mcycle = std::make_shared<wide_counter_csr_t>(proc, CSR_MCYCLE);
+  if (proc->extension_enabled_const(EXT_ZICNTR)) {
+    csrmap[CSR_INSTRET] = std::make_shared<counter_proxy_csr_t>(proc, CSR_INSTRET, minstret);
+    csrmap[CSR_CYCLE] = std::make_shared<counter_proxy_csr_t>(proc, CSR_CYCLE, mcycle);
+  }
   if (xlen == 32) {
-    minstreth_csr_t_p minstreth;
-    csrmap[CSR_MINSTRETH] = minstreth = std::make_shared<minstreth_csr_t>(proc, CSR_MINSTRETH, minstret);
-    csrmap[CSR_MCYCLEH] = std::make_shared<proxy_csr_t>(proc, CSR_MCYCLEH, minstreth);
-    csrmap[CSR_INSTRETH] = std::make_shared<counter_proxy_csr_t>(proc, CSR_INSTRETH, minstreth);
-    csrmap[CSR_CYCLEH] = std::make_shared<counter_proxy_csr_t>(proc, CSR_CYCLEH, minstreth);
+    counter_top_csr_t_p minstreth, mcycleh;
+    csrmap[CSR_MINSTRETH] = minstreth = std::make_shared<counter_top_csr_t>(proc, CSR_MINSTRETH, minstret);
+    csrmap[CSR_MCYCLEH] = mcycleh = std::make_shared<counter_top_csr_t>(proc, CSR_MCYCLEH, mcycle);
+    if (proc->extension_enabled_const(EXT_ZICNTR)) {
+      csrmap[CSR_INSTRETH] = std::make_shared<counter_proxy_csr_t>(proc, CSR_INSTRETH, minstreth);
+      csrmap[CSR_CYCLEH] = std::make_shared<counter_proxy_csr_t>(proc, CSR_CYCLEH, mcycleh);
+    }
   }
   for (reg_t i=3; i<=31; ++i) {
     const reg_t which_mevent = CSR_MHPMEVENT3 + i - 3;
@@ -390,15 +446,20 @@ void state_t::reset(processor_t* const proc, reg_t max_isa)
     const reg_t which_counterh = CSR_HPMCOUNTER3H + i - 3;
     auto mevent = std::make_shared<const_csr_t>(proc, which_mevent, 0);
     auto mcounter = std::make_shared<const_csr_t>(proc, which_mcounter, 0);
-    auto counter = std::make_shared<counter_proxy_csr_t>(proc, which_counter, mcounter);
     csrmap[which_mevent] = mevent;
     csrmap[which_mcounter] = mcounter;
-    csrmap[which_counter] = counter;
+
+    if (proc->extension_enabled_const(EXT_ZICNTR) && proc->extension_enabled_const(EXT_ZIHPM)) {
+      auto counter = std::make_shared<counter_proxy_csr_t>(proc, which_counter, mcounter);
+      csrmap[which_counter] = counter;
+    }
     if (xlen == 32) {
       auto mcounterh = std::make_shared<const_csr_t>(proc, which_mcounterh, 0);
-      auto counterh = std::make_shared<counter_proxy_csr_t>(proc, which_counterh, mcounterh);
       csrmap[which_mcounterh] = mcounterh;
-      csrmap[which_counterh] = counterh;
+      if (proc->extension_enabled_const(EXT_ZICNTR) && proc->extension_enabled_const(EXT_ZIHPM)) {
+        auto counterh = std::make_shared<counter_proxy_csr_t>(proc, which_counterh, mcounterh);
+        csrmap[which_counterh] = counterh;
+      }
     }
   }
   csrmap[CSR_MCOUNTINHIBIT] = std::make_shared<const_csr_t>(proc, CSR_MCOUNTINHIBIT, 0);
@@ -546,6 +607,15 @@ void state_t::reset(processor_t* const proc, reg_t max_isa)
   csrmap[CSR_MIMPID] = std::make_shared<const_csr_t>(proc, CSR_MIMPID, 0);
   csrmap[CSR_MVENDORID] = std::make_shared<const_csr_t>(proc, CSR_MVENDORID, 0);
   csrmap[CSR_MHARTID] = std::make_shared<const_csr_t>(proc, CSR_MHARTID, proc->get_id());
+  const reg_t menvcfg_mask = (proc->extension_enabled(EXT_ZICBOM) ? MENVCFG_CBCFE | MENVCFG_CBIE: 0) |
+                             (proc->extension_enabled(EXT_ZICBOZ) ? MENVCFG_CBZE: 0);
+  csrmap[CSR_MENVCFG] = menvcfg = std::make_shared<masked_csr_t>(proc, CSR_MENVCFG, menvcfg_mask, 0);
+  const reg_t senvcfg_mask = (proc->extension_enabled(EXT_ZICBOM) ? SENVCFG_CBCFE | SENVCFG_CBIE: 0) |
+                             (proc->extension_enabled(EXT_ZICBOZ) ? SENVCFG_CBZE: 0);
+  csrmap[CSR_SENVCFG] = senvcfg = std::make_shared<masked_csr_t>(proc, CSR_SENVCFG, senvcfg_mask, 0);
+  const reg_t henvcfg_mask = (proc->extension_enabled(EXT_ZICBOM) ? HENVCFG_CBCFE | HENVCFG_CBIE: 0) |
+                             (proc->extension_enabled(EXT_ZICBOZ) ? HENVCFG_CBZE: 0);
+  csrmap[CSR_HENVCFG] = henvcfg = std::make_shared<masked_csr_t>(proc, CSR_HENVCFG, henvcfg_mask, 0);
 
   serialized = false;
 
@@ -646,8 +716,8 @@ void processor_t::enable_log_commits()
 
 void processor_t::reset()
 {
-  xlen = max_xlen;
-  state.reset(this, max_isa);
+  xlen = isa.get_max_xlen();
+  state.reset(this, isa.get_max_isa());
   state.dcsr->halt = halt_on_reset;
   halt_on_reset = false;
   VU.reset();
@@ -782,7 +852,7 @@ void processor_t::take_interrupt(reg_t pending_interrupts)
     else
       abort();
 
-    throw trap_t(((reg_t)1 << (max_xlen-1)) | ctz(enabled_interrupts));
+    throw trap_t(((reg_t)1 << (isa.get_max_xlen()-1)) | ctz(enabled_interrupts));
   }
 }
 
@@ -846,6 +916,8 @@ void processor_t::debug_output_log(std::stringstream *s)
 
 void processor_t::take_trap(trap_t& t, reg_t epc)
 {
+  unsigned max_xlen = isa.get_max_xlen();
+
   if (debug) {
     std::stringstream s; // first put everything in a string, later send it to output
     s << "core " << std::dec << std::setfill(' ') << std::setw(3) << id
@@ -969,6 +1041,8 @@ void processor_t::disasm(insn_t insn)
         << ": Executed " << executions << " times" << std::endl;
     }
 
+    unsigned max_xlen = isa.get_max_xlen();
+
     s << "core " << std::dec << std::setfill(' ') << std::setw(3) << id
       << std::hex << ": 0x" << std::setfill('0') << std::setw(max_xlen/4)
       << zext(state.pc, max_xlen) << " (0x" << std::setw(8) << bits << ") "
@@ -986,6 +1060,7 @@ void processor_t::disasm(insn_t insn)
 
 int processor_t::paddr_bits()
 {
+  unsigned max_xlen = isa.get_max_xlen();
   assert(xlen == max_xlen);
   return max_xlen == 64 ? 50 : 34;
 }
@@ -1027,11 +1102,13 @@ insn_func_t processor_t::decode_insn(insn_t insn)
   size_t idx = insn.bits() % OPCODE_CACHE_SIZE;
   insn_desc_t desc = opcode_cache[idx];
 
-  if (unlikely(insn.bits() != desc.match || !(xlen == 64 ? desc.rv64 : desc.rv32))) {
+  bool rve = extension_enabled('E');
+
+  if (unlikely(insn.bits() != desc.match || !desc.func(xlen, rve))) {
     // fall back to linear search
     int cnt = 0;
     insn_desc_t* p = &instructions[0];
-    while ((insn.bits() & p->mask) != p->match || !(xlen == 64 ? p->rv64 : p->rv32))
+    while ((insn.bits() & p->mask) != p->match || !desc.func(xlen, rve))
       p++, cnt++;
     desc = *p;
 
@@ -1048,7 +1125,7 @@ insn_func_t processor_t::decode_insn(insn_t insn)
     opcode_cache[idx].match = insn.bits();
   }
 
-  return xlen == 64 ? desc.rv64 : desc.rv32;
+  return desc.func(xlen, rve);
 }
 
 void processor_t::register_insn(insn_desc_t desc)
@@ -1068,7 +1145,7 @@ void processor_t::build_opcode_map()
   std::sort(instructions.begin(), instructions.end(), cmp());
 
   for (size_t i = 0; i < OPCODE_CACHE_SIZE; i++)
-    opcode_cache[i] = {0, 0, &illegal_instruction, &illegal_instruction};
+    opcode_cache[i] = insn_desc_t::illegal();
 }
 
 void processor_t::register_extension(extension_t* x)
@@ -1077,15 +1154,13 @@ void processor_t::register_extension(extension_t* x)
     register_insn(insn);
   build_opcode_map();
 
-  if (disassembler)
-    for (auto disasm_insn : x->get_disasms())
-      disassembler->add_insn(disasm_insn);
+  for (auto disasm_insn : x->get_disasms())
+    disassembler->add_insn(disasm_insn);
 
   if (!custom_extensions.insert(std::make_pair(x->name(), x)).second) {
     fprintf(stderr, "extensions must have unique names (got two named \"%s\"!)\n", x->name());
     abort();
   }
-
   x->set_processor(this);
 }
 
@@ -1097,17 +1172,23 @@ void processor_t::register_base_instructions()
   #undef DECLARE_INSN
 
   #define DEFINE_INSN(name) \
-    extern reg_t rv32_##name(processor_t*, insn_t, reg_t); \
-    extern reg_t rv64_##name(processor_t*, insn_t, reg_t); \
+    extern reg_t rv32i_##name(processor_t*, insn_t, reg_t); \
+    extern reg_t rv64i_##name(processor_t*, insn_t, reg_t); \
+    extern reg_t rv32e_##name(processor_t*, insn_t, reg_t); \
+    extern reg_t rv64e_##name(processor_t*, insn_t, reg_t); \
     register_insn((insn_desc_t){ \
       name##_match, \
       name##_mask, \
-      rv32_##name, \
-      rv64_##name});
+      rv32i_##name, \
+      rv64i_##name, \
+      rv32e_##name, \
+      rv64e_##name});
   #include "insn_list.h"
   #undef DEFINE_INSN
 
-  register_insn({0, 0, &illegal_instruction, &illegal_instruction});
+  // terminate instruction list with a catch-all
+  register_insn(insn_desc_t::illegal());
+
   build_opcode_map();
 }
 

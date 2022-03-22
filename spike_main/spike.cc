@@ -1,5 +1,6 @@
 // See LICENSE for license details.
 
+#include "cfg.h"
 #include "sim.h"
 #include "mmu.h"
 #include "remote_bitbang.h"
@@ -61,7 +62,7 @@ static void help(int exit_code = 1)
   fprintf(stderr, "  --bootargs=<args>     Provide custom bootargs for kernel [default: console=hvc0 earlycon=sbi]\n");
   fprintf(stderr, "  --real-time-clint     Increment clint time at real-time rate\n");
   fprintf(stderr, "  --dm-progsize=<words> Progsize for the debug module [default 2]\n");
-  fprintf(stderr, "  --dm-sba=<bits>       Debug bus master supports up to "
+  fprintf(stderr, "  --dm-sba=<bits>       Debug system bus access supports up to "
       "<bits> wide accesses [default 0]\n");
   fprintf(stderr, "  --dm-auth             Debug module requires debugger to authenticate\n");
   fprintf(stderr, "  --dmi-rti=<n>         Number of Run-Test/Idle cycles "
@@ -72,6 +73,7 @@ static void help(int exit_code = 1)
   fprintf(stderr, "  --dm-no-abstract-csr  Debug module won't support abstract to authenticate\n");
   fprintf(stderr, "  --dm-no-halt-groups   Debug module won't support halt groups\n");
   fprintf(stderr, "  --dm-no-impebreak     Debug module won't support implicit ebreak in program buffer\n");
+  fprintf(stderr, "  --blocksz=<size>      Cache block size (B) for CMO operations(powers of 2) [default 64]\n");
 
   exit(exit_code);
 }
@@ -217,12 +219,8 @@ int main(int argc, char** argv)
   bool dump_dts = false;
   bool dtb_enabled = true;
   bool real_time_clint = false;
-  size_t nprocs = 1;
   const char* kernel = NULL;
   reg_t kernel_offset, kernel_size;
-  size_t initrd_size;
-  reg_t initrd_start = 0, initrd_end = 0;
-  const char* bootargs = NULL;
   reg_t start_pc = reg_t(-1);
   std::vector<std::pair<reg_t, mem_t*>> mems;
   std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices;
@@ -234,16 +232,15 @@ int main(int argc, char** argv)
   const char *log_path = nullptr;
   std::vector<std::function<extension_t*()>> extensions;
   const char* initrd = NULL;
-  const char* isa = DEFAULT_ISA;
-  const char* priv = DEFAULT_PRIV;
   const char* varch = DEFAULT_VARCH;
   const char* dtb_file = NULL;
   uint16_t rbb_port = 0;
   bool use_rbb = false;
   unsigned dmi_rti = 0;
+  reg_t blocksz = 64;
   debug_module_config_t dm_config = {
     .progbufsize = 2,
-    .max_bus_master_bits = 0,
+    .max_sba_data_width = 0,
     .require_authentication = false,
     .abstract_rti = 0,
     .support_hasel = true,
@@ -252,6 +249,11 @@ int main(int argc, char** argv)
     .support_impebreak = true
   };
   std::vector<int> hartids;
+  cfg_t cfg(/*default_initrd_bounds=*/std::make_pair((reg_t)0, (reg_t)0),
+            /*default_bootargs=*/nullptr,
+            /*default_nprocs=*/1,
+            /*default_isa=*/DEFAULT_ISA,
+            /*default_priv=*/DEFAULT_PRIV);
 
   auto const hartids_parser = [&](const char *s) {
     std::string const str(s);
@@ -317,7 +319,7 @@ int main(int argc, char** argv)
 #ifdef HAVE_BOOST_ASIO
   parser.option('s', 0, 0, [&](const char* s){socket = true;});
 #endif
-  parser.option('p', 0, 1, [&](const char* s){nprocs = atoul_nonzero_safe(s);});
+  parser.option('p', 0, 1, [&](const char* s){cfg.nprocs = atoul_nonzero_safe(s);});
   parser.option('m', 0, 1, [&](const char* s){mems = make_mems(s);});
   // I wanted to use --halted, but for some reason that doesn't work.
   parser.option('H', 0, 0, [&](const char* s){halted = true;});
@@ -328,8 +330,8 @@ int main(int argc, char** argv)
   parser.option(0, "dc", 1, [&](const char* s){dc.reset(new dcache_sim_t(s));});
   parser.option(0, "l2", 1, [&](const char* s){l2.reset(cache_sim_t::construct(s, "L2$"));});
   parser.option(0, "log-cache-miss", 0, [&](const char* s){log_cache = true;});
-  parser.option(0, "isa", 1, [&](const char* s){isa = s;});
-  parser.option(0, "priv", 1, [&](const char* s){priv = s;});
+  parser.option(0, "isa", 1, [&](const char* s){cfg.isa = s;});
+  parser.option(0, "priv", 1, [&](const char* s){cfg.priv = s;});
   parser.option(0, "varch", 1, [&](const char* s){varch = s;});
   parser.option(0, "device", 1, device_parser);
   parser.option(0, "extension", 1, [&](const char* s){extensions.push_back(find_extension(s));});
@@ -338,7 +340,7 @@ int main(int argc, char** argv)
   parser.option(0, "dtb", 1, [&](const char *s){dtb_file = s;});
   parser.option(0, "kernel", 1, [&](const char* s){kernel = s;});
   parser.option(0, "initrd", 1, [&](const char* s){initrd = s;});
-  parser.option(0, "bootargs", 1, [&](const char* s){bootargs = s;});
+  parser.option(0, "bootargs", 1, [&](const char* s){cfg.bootargs = s;});
   parser.option(0, "real-time-clint", 0, [&](const char *s){real_time_clint = true;});
   parser.option(0, "extlib", 1, [&](const char *s){
     void *lib = dlopen(s, RTLD_NOW | RTLD_GLOBAL);
@@ -352,7 +354,7 @@ int main(int argc, char** argv)
   parser.option(0, "dm-no-impebreak", 0,
       [&](const char* s){dm_config.support_impebreak = false;});
   parser.option(0, "dm-sba", 1,
-      [&](const char* s){dm_config.max_bus_master_bits = atoul_safe(s);});
+      [&](const char* s){dm_config.max_sba_data_width = atoul_safe(s);});
   parser.option(0, "dm-auth", 0,
       [&](const char* s){dm_config.require_authentication = true;});
   parser.option(0, "dmi-rti", 1,
@@ -376,6 +378,13 @@ int main(int argc, char** argv)
         exit(-1);
      }
   });
+  parser.option(0, "blocksz", 1, [&](const char* s){
+    blocksz = strtoull(s, 0, 0);
+    if (((blocksz & (blocksz - 1))) != 0) {
+      fprintf(stderr, "--blocksz should be power of 2\n");
+      exit(-1);
+    }
+  });
 
   auto argv1 = parser.parse(argv);
   std::vector<std::string> htif_args(argv1, (const char*const*)argv + argc);
@@ -386,6 +395,7 @@ int main(int argc, char** argv)
     help();
 
   if (kernel && check_file_exists(kernel)) {
+    const char *isa = cfg.isa();
     kernel_size = get_file_size(kernel);
     if (isa[2] == '6' && isa[3] == '4')
       kernel_offset = 0x200000;
@@ -400,11 +410,12 @@ int main(int argc, char** argv)
   }
 
   if (initrd && check_file_exists(initrd)) {
-    initrd_size = get_file_size(initrd);
+    size_t initrd_size = get_file_size(initrd);
     for (auto& m : mems) {
       if (initrd_size && (initrd_size + 0x1000) < m.second->size()) {
-         initrd_end = m.first + m.second->size() - 0x1000;
-         initrd_start = initrd_end - initrd_size;
+         reg_t initrd_end = m.first + m.second->size() - 0x1000;
+         reg_t initrd_start = initrd_end - initrd_size;
+         cfg.initrd_bounds = std::make_pair(initrd_start, initrd_end);
          read_file_bytes(initrd, 0, m.second, initrd_start - m.first, initrd_size);
          break;
       }
@@ -434,8 +445,8 @@ int main(int argc, char** argv)
   }
 #endif
 
-  sim_t s(isa, priv, varch, nprocs, halted, real_time_clint,
-      initrd_start, initrd_end, bootargs, start_pc, mems, plugin_devices, htif_args,
+  sim_t s(&cfg, varch, halted, real_time_clint,
+      start_pc, mems, plugin_devices, htif_args,
       std::move(hartids), dm_config, log_path, dtb_enabled, dtb_file,
 #ifdef HAVE_BOOST_ASIO
       io_service_ptr, acceptor_ptr,
@@ -458,12 +469,13 @@ int main(int argc, char** argv)
   if (dc && l2) dc->set_miss_handler(&*l2);
   if (ic) ic->set_log(log_cache);
   if (dc) dc->set_log(log_cache);
-  for (size_t i = 0; i < nprocs; i++)
+  for (size_t i = 0; i < cfg.nprocs(); i++)
   {
     if (ic) s.get_core(i)->get_mmu()->register_memtracer(&*ic);
     if (dc) s.get_core(i)->get_mmu()->register_memtracer(&*dc);
     for (auto e : extensions)
       s.get_core(i)->register_extension(e());
+    s.get_core(i)->get_mmu()->set_cache_blocksz(blocksz);
   }
 
   s.set_debug(debug);

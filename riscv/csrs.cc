@@ -75,10 +75,6 @@ basic_csr_t::basic_csr_t(processor_t* const proc, const reg_t addr, const reg_t 
   val(init) {
 }
 
-reg_t basic_csr_t::read() const noexcept {
-  return val;
-}
-
 bool basic_csr_t::unlogged_write(const reg_t val) noexcept {
   this->val = val;
   return true;
@@ -304,8 +300,8 @@ reg_t cause_csr_t::read() const noexcept {
   // When reading, the interrupt bit needs to adjust to xlen. Spike does
   // not generally support dynamic xlen, but this code was (partly)
   // there since at least 2015 (ea58df8 and c4350ef).
-  if (proc->get_max_xlen() > proc->get_xlen()) // Move interrupt bit to top of xlen
-    return val | ((val >> (proc->get_max_xlen()-1)) << (proc->get_xlen()-1));
+  if (proc->get_isa().get_max_xlen() > proc->get_xlen()) // Move interrupt bit to top of xlen
+    return val | ((val >> (proc->get_isa().get_max_xlen()-1)) << (proc->get_xlen()-1));
   return val;
 }
 
@@ -319,12 +315,6 @@ base_status_csr_t::base_status_csr_t(processor_t* const proc, const reg_t addr):
                     | (proc->get_const_xlen() == 32 ? SSTATUS32_SD : SSTATUS64_SD)) {
 }
 
-
-bool base_status_csr_t::enabled(const reg_t which) {
-  // If the field doesn't exist, it is always enabled. See #823.
-  if ((sstatus_write_mask & which) == 0) return true;
-  return (read() & which) != 0;
-}
 
 reg_t base_status_csr_t::compute_sstatus_write_mask() const noexcept {
   // If a configuration has FS bits, they will always be accessible no
@@ -384,10 +374,6 @@ vsstatus_csr_t::vsstatus_csr_t(processor_t* const proc, const reg_t addr):
   val(proc->get_state()->mstatus->read() & sstatus_read_mask) {
 }
 
-reg_t vsstatus_csr_t::read() const noexcept {
-  return val;
-}
-
 bool vsstatus_csr_t::unlogged_write(const reg_t val) noexcept {
   const reg_t newval = (this->val & ~sstatus_write_mask) | (val & sstatus_write_mask);
   if (state->v) maybe_flush_tlb(newval);
@@ -397,13 +383,9 @@ bool vsstatus_csr_t::unlogged_write(const reg_t val) noexcept {
 
 
 // implement class sstatus_proxy_csr_t
-sstatus_proxy_csr_t::sstatus_proxy_csr_t(processor_t* const proc, const reg_t addr, csr_t_p mstatus):
+sstatus_proxy_csr_t::sstatus_proxy_csr_t(processor_t* const proc, const reg_t addr, mstatus_csr_t_p mstatus):
   base_status_csr_t(proc, addr),
   mstatus(mstatus) {
-}
-
-reg_t sstatus_proxy_csr_t::read() const noexcept {
-  return mstatus->read() & sstatus_read_mask;
 }
 
 bool sstatus_proxy_csr_t::unlogged_write(const reg_t val) noexcept {
@@ -418,18 +400,14 @@ bool sstatus_proxy_csr_t::unlogged_write(const reg_t val) noexcept {
 mstatus_csr_t::mstatus_csr_t(processor_t* const proc, const reg_t addr):
   base_status_csr_t(proc, addr),
   val(0
-      | (proc->extension_enabled_const('U') ? set_field((reg_t)0, MSTATUS_UXL, xlen_to_uxl(proc->get_const_xlen())) : 0)
-      | (proc->extension_enabled_const('S') ? set_field((reg_t)0, MSTATUS_SXL, xlen_to_uxl(proc->get_const_xlen())) : 0)
+      | (proc->extension_enabled_const('U') && (proc->get_const_xlen() != 32) ? set_field((reg_t)0, MSTATUS_UXL, xlen_to_uxl(proc->get_const_xlen())) : 0)
+      | (proc->extension_enabled_const('S') && (proc->get_const_xlen() != 32) ? set_field((reg_t)0, MSTATUS_SXL, xlen_to_uxl(proc->get_const_xlen())) : 0)
+
 #ifdef RISCV_ENABLE_DUAL_ENDIAN
       | (proc->get_mmu()->is_target_big_endian() ? MSTATUS_UBE | MSTATUS_SBE | MSTATUS_MBE : 0)
 #endif
       | 0  // initial value for mstatus
   ) {
-}
-
-
-reg_t mstatus_csr_t::read() const noexcept {
-  return val;
 }
 
 
@@ -439,7 +417,8 @@ bool mstatus_csr_t::unlogged_write(const reg_t val) noexcept {
 
   const reg_t mask = sstatus_write_mask
                    | MSTATUS_MIE | MSTATUS_MPIE | MSTATUS_MPRV
-                   | MSTATUS_MPP | MSTATUS_TW | MSTATUS_TSR
+                   | MSTATUS_MPP | MSTATUS_TW
+                   | (proc->extension_enabled('S') ? MSTATUS_TSR : 0)
                    | (has_page ? MSTATUS_TVM : 0)
                    | (has_gva ? MSTATUS_GVA : 0)
                    | (has_mpv ? MSTATUS_MPV : 0);
@@ -468,29 +447,40 @@ bool mstatush_csr_t::unlogged_write(const reg_t val) noexcept {
 }
 
 // implement class sstatus_csr_t
-sstatus_csr_t::sstatus_csr_t(processor_t* const proc, base_status_csr_t_p orig, base_status_csr_t_p virt):
+sstatus_csr_t::sstatus_csr_t(processor_t* const proc, sstatus_proxy_csr_t_p orig, vsstatus_csr_t_p virt):
   virtualized_csr_t(proc, orig, virt),
   orig_sstatus(orig),
   virt_sstatus(virt) {
 }
 
 void sstatus_csr_t::dirty(const reg_t dirties) {
+  // As an optimization, return early if already dirty.
+  if ((orig_sstatus->read() & dirties) == dirties) {
+    if (likely(!state->v || (virt_sstatus->read() & dirties) == dirties))
+      return;
+  }
+
   // Catch problems like #823 where P-extension instructions were not
   // checking for mstatus.VS!=Off:
   if (!enabled(dirties)) abort();
 
-  orig_csr->write(orig_csr->read() | dirties);
+  orig_sstatus->write(orig_sstatus->read() | dirties);
   if (state->v) {
-    virt_csr->write(virt_csr->read() | dirties);
+    virt_sstatus->write(virt_sstatus->read() | dirties);
   }
 }
 
 bool sstatus_csr_t::enabled(const reg_t which) {
-  if (!orig_sstatus->enabled(which))
-    return false;
-  if (state->v && !virt_sstatus->enabled(which))
-    return false;
-  return true;
+  if ((orig_sstatus->read() & which) != 0) {
+    if (!state->v || (virt_sstatus->read() & which) != 0)
+      return true;
+  }
+
+  // If the field doesn't exist, it is always enabled. See #823.
+  if (!orig_sstatus->field_exists(which))
+    return true;
+
+  return false;
 }
 
 
@@ -540,11 +530,6 @@ bool misa_csr_t::unlogged_write(const reg_t val) noexcept {
   }
 
   return basic_csr_t::unlogged_write(new_misa);
-}
-
-bool misa_csr_t::extension_enabled(unsigned char ext) const noexcept {
-  assert(ext >= 'A' && ext <= 'Z');
-  return (read() >> (ext - 'A')) & 1;
 }
 
 bool misa_csr_t::extension_enabled_const(unsigned char ext) const noexcept {
@@ -834,21 +819,21 @@ bool virtualized_satp_csr_t::unlogged_write(const reg_t val) noexcept {
 }
 
 
-// implement class minstret_csr_t
-minstret_csr_t::minstret_csr_t(processor_t* const proc, const reg_t addr):
+// implement class wide_counter_csr_t
+wide_counter_csr_t::wide_counter_csr_t(processor_t* const proc, const reg_t addr):
   csr_t(proc, addr),
   val(0) {
 }
 
-reg_t minstret_csr_t::read() const noexcept {
+reg_t wide_counter_csr_t::read() const noexcept {
   return val;
 }
 
-void minstret_csr_t::bump(const reg_t howmuch) noexcept {
+void wide_counter_csr_t::bump(const reg_t howmuch) noexcept {
   val += howmuch;  // to keep log reasonable size, don't log every bump
 }
 
-bool minstret_csr_t::unlogged_write(const reg_t val) noexcept {
+bool wide_counter_csr_t::unlogged_write(const reg_t val) noexcept {
   if (proc->get_xlen() == 32)
     this->val = (this->val >> 32 << 32) | (val & 0xffffffffU);
   else
@@ -861,12 +846,12 @@ bool minstret_csr_t::unlogged_write(const reg_t val) noexcept {
   return true;
 }
 
-reg_t minstret_csr_t::written_value() const noexcept {
+reg_t wide_counter_csr_t::written_value() const noexcept {
   // Re-adjust for upcoming bump()
   return this->val + 1;
 }
 
-void minstret_csr_t::write_upper_half(const reg_t val) noexcept {
+void wide_counter_csr_t::write_upper_half(const reg_t val) noexcept {
   this->val = (val << 32) | (this->val << 32 >> 32);
   this->val--; // See comment above.
   // Log upper half only.
@@ -874,17 +859,17 @@ void minstret_csr_t::write_upper_half(const reg_t val) noexcept {
 }
 
 
-minstreth_csr_t::minstreth_csr_t(processor_t* const proc, const reg_t addr, minstret_csr_t_p minstret):
+counter_top_csr_t::counter_top_csr_t(processor_t* const proc, const reg_t addr, wide_counter_csr_t_p parent):
   csr_t(proc, addr),
-  minstret(minstret) {
+  parent(parent) {
 }
 
-reg_t minstreth_csr_t::read() const noexcept {
-  return minstret->read() >> 32;
+reg_t counter_top_csr_t::read() const noexcept {
+  return parent->read() >> 32;
 }
 
-bool minstreth_csr_t::unlogged_write(const reg_t val) noexcept {
-  minstret->write_upper_half(val);
+bool counter_top_csr_t::unlogged_write(const reg_t val) noexcept {
+  parent->write_upper_half(val);
   return true;
 }
 
@@ -927,13 +912,11 @@ bool counter_proxy_csr_t::myenable(csr_t_p counteren) const noexcept {
 }
 
 void counter_proxy_csr_t::verify_permissions(insn_t insn, bool write) const {
-  proxy_csr_t::verify_permissions(insn, write);
-
   const bool mctr_ok = (state->prv < PRV_M) ? myenable(state->mcounteren) : true;
   const bool hctr_ok = state->v ? myenable(state->hcounteren) : true;
   const bool sctr_ok = (proc->extension_enabled('S') && state->prv < PRV_S) ? myenable(state->scounteren) : true;
 
-  if (!mctr_ok)
+  if (write || !mctr_ok)
     throw trap_illegal_instruction(insn.bits());
   if (!hctr_ok)
       throw trap_virtual_instruction(insn.bits());

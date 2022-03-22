@@ -349,6 +349,10 @@ void processor_t::step(size_t n)
     }
 
     state.minstret->bump(instret);
+
+    // Model a hart whose CPI is 1.
+    state.mcycle->bump(instret);
+
     n -= instret;
   }
 }
