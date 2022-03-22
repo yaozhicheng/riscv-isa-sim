@@ -12,7 +12,7 @@ static std::vector<std::pair<reg_t, mem_t*>> difftest_mem(
 static std::vector<int> difftest_hartids;
 static debug_module_config_t difftest_dm_config = {
   .progbufsize = 2,
-  .max_bus_master_bits = 0,
+  .max_sba_data_width = 0,
   .require_authentication = false,
   .abstract_rti = 0,
   .support_hasel = true,
@@ -214,19 +214,25 @@ void difftest_exec(uint64_t n) {
 
 void difftest_init(int port) {
   difftest_htif_args.push_back("");
-  s = new sim_t(
-    // const char* isa
-    "RV64IMAFDC_zba_zbb_zbc_zbs_zbkb_zbkc_zbkx_zknd_zkne_zknh_zksed_zksh_svinval",
-    // const char* priv
-    DEFAULT_PRIV,
-    // const char* varch
-    DEFAULT_VARCH,
-    // size_t _nprocs
+  auto const cfg = new cfg_t(
+    // std::pair<reg_t, reg_t> default_initrd_bounds,
+    std::make_pair(0, 0),
+    // const char *default_bootargs,
+    nullptr,
+    // size_t default_nprocs,
     1,
+    // const char *default_isa,
+    "RV64IMAFDC_zba_zbb_zbc_zbs_zbkb_zbkc_zbkx_zknd_zkne_zknh_zksed_zksh_svinval",
+    // const char *default_priv
+    DEFAULT_PRIV
+  );
+  s = new sim_t(
+    // const cfg_t *cfg,
+    cfg,
+    // const char* varch,
+    DEFAULT_VARCH,
     // bool halted, bool real_time_clint
     false, false,
-    // reg_t initrd_start, reg_t initrd_end, const char* bootargs
-    0, 0, nullptr,
     // reg_t start_pc, std::vector<std::pair<reg_t, mem_t*>> mems
     reg_t(-1), difftest_mem,
     // std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices
