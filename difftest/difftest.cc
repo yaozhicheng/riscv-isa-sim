@@ -251,7 +251,7 @@ void difftest_init(int port) {
 }
 
 void difftest_raise_intr(uint64_t NO) {
-  if (NO & 0xc) {
+  if (NO == 0xc) {
     s->diff_debugmode();  // Debug Intr
   } else {
     uint64_t mip_bit = 0x1UL << (NO & 0xf);
