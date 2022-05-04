@@ -6,8 +6,9 @@ REPO_MAKEFILE = $(REPO_BUILD_PATH)/Makefile
 
 $(REPO_MAKEFILE): $(REPO_PATH)/configure
 	mkdir -p $(@D)
-	cd $(@D) && $(abspath $(REPO_PATH))/configure --enable-dirty --with-boost=no --with-boost-asio=no --with-boost-regex=no CXXFLAGS="-O3" CFLAGS="-O3"
-	sed -i -e 's/-g -O2/-O3/' $@
+	cd $(@D) && $(abspath $(REPO_PATH))/configure -q --enable-dirty \
+	  --with-boost=no --with-boost-asio=no --with-boost-regex=no    \
+	  CXXFLAGS="-O3" CFLAGS="-O3"
 
 SPIKE = $(REPO_BUILD_PATH)/spike
 
@@ -28,7 +29,7 @@ BINARY = $(BUILD_DIR)/$(NAME)
 SRCS = difftest.cc dummy_debug.cc $(shell find ./include -name '*.h')
 
 $(BINARY): $(SPIKE) $(SRCS)
-	g++ -O3 -shared -fPIC $(INC_PATH) $(SRCS) $(INC_LIBS) -o $@
+	g++ -O3 --std=c++17 -shared -fPIC $(INC_PATH) $(SRCS) $(INC_LIBS) -o $@
 
 clean:
 	rm -rf $(BUILD_DIR) $(REPO_BUILD_PATH)
