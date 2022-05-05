@@ -6,6 +6,7 @@
 #include <string.h>
 #include <assert.h>
 #include <stdlib.h>
+#include "sim.h"
 
 typedef uint64_t word_t;
 typedef int64_t sword_t;
@@ -18,5 +19,8 @@ typedef uint64_t paddr_t;
 typedef uint16_t ioaddr_t;
 
 #define CONFIG_MSIZE (8 * 1024 * 1024 * 1024UL)
+
+std::vector<mem_cfg_t> parse_mem_layout(const char* arg);
+std::vector<std::pair<reg_t, mem_t*>> make_mems(const std::vector<mem_cfg_t> &layout);
 
 #endif

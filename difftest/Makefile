@@ -26,7 +26,7 @@ INC_LIBS  = $(addprefix $(REPO_PATH)/build/, $(lib_dependencies))
 
 NAME = $(GUEST_ISA)-spike-so
 BINARY = $(BUILD_DIR)/$(NAME)
-SRCS = difftest.cc dummy_debug.cc $(shell find ./include -name '*.h')
+SRCS = $(shell find . -name '*.cc') $(shell find ./include -name '*.h')
 
 $(BINARY): $(SPIKE) $(SRCS)
 	g++ -O3 --std=c++17 -shared -fPIC $(INC_PATH) $(SRCS) $(INC_LIBS) -o $@
@@ -37,4 +37,3 @@ clean:
 .DEFAULT_GOAL = $(BINARY)
 
 .PHONY: clean $(SPIKE)
-

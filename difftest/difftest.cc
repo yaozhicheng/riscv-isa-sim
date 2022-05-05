@@ -1,15 +1,8 @@
-#include "sim.h"
 #include "include/common.h"
 #include "include/difftest-def.h"
 #include "include/dummy_debug.h"
 #include "disasm.h"
 
-static std::vector<std::pair<reg_t, abstract_device_t*>> difftest_plugin_devices(
- 1, std::make_pair(reg_t(DM_BASE_ADDR), new dummy_debug_t));
-static std::vector<std::string> difftest_htif_args;
-static std::vector<std::pair<reg_t, mem_t*>> difftest_mem(
-    1, std::make_pair(reg_t(DRAM_BASE), new mem_t(CONFIG_MSIZE)));
-static std::vector<int> difftest_hartids;
 static debug_module_config_t difftest_dm_config = {
   .progbufsize = 2,
   .max_sba_data_width = 0,
@@ -213,34 +206,42 @@ void difftest_exec(uint64_t n) {
 }
 
 void difftest_init(int port) {
+  std::vector<std::string> difftest_htif_args;
   difftest_htif_args.push_back("");
+  char mem_layout_str[100];
+  sprintf(mem_layout_str, "0x%x:0x%lx", DRAM_BASE, CONFIG_MSIZE);
+  auto memory_layout = parse_mem_layout(mem_layout_str);
+  static std::vector<std::pair<reg_t, abstract_device_t*>> difftest_plugin_devices{
+  std::make_pair(reg_t(DM_BASE_ADDR), new dummy_debug_t)};
   auto const cfg = new cfg_t(
     // std::pair<reg_t, reg_t> default_initrd_bounds,
     std::make_pair(0, 0),
     // const char *default_bootargs,
     nullptr,
-    // size_t default_nprocs,
-    1,
     // const char *default_isa,
     "RV64IMAFDC_zba_zbb_zbc_zbs_zbkb_zbkc_zbkx_zknd_zkne_zknh_zksed_zksh_svinval",
     // const char *default_priv
-    DEFAULT_PRIV
+    DEFAULT_PRIV,
+    // const char *default_varch,
+    DEFAULT_VARCH,
+    // const std::vector<mem_cfg_t> &default_mem_layout,
+    memory_layout,
+    // const std::vector<int> default_hartids,
+    std::vector<int>{0},
+    // bool default_real_time_clint
+    false
   );
   s = new sim_t(
     // const cfg_t *cfg,
     cfg,
-    // const char* varch,
-    DEFAULT_VARCH,
-    // bool halted, bool real_time_clint
-    false, false,
-    // reg_t start_pc, std::vector<std::pair<reg_t, mem_t*>> mems
-    reg_t(-1), difftest_mem,
+    // bool halted,
+    false,
+    // std::vector<std::pair<reg_t, mem_t*>> mems
+    make_mems(memory_layout),
     // std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices
     difftest_plugin_devices,
     // const std::vector<std::string>& args
     difftest_htif_args,
-    // const std::vector<int> hartids
-    std::move(difftest_hartids),
     // const debug_module_config_t &dm_config
     difftest_dm_config,
     // const char *log_path
