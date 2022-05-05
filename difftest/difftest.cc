@@ -201,6 +201,18 @@ void difftest_regcpy(void* dut, bool direction) {
   }
 }
 
+void difftest_csrcpy(void *dut, bool direction) {
+
+}
+
+void difftest_uarchstatus_cpy(void *dut, bool direction) {
+
+}
+
+void update_dynamic_config(void* config) {
+
+}
+
 void difftest_exec(uint64_t n) {
   s->diff_step(n);
 }
@@ -291,6 +303,10 @@ void debug_mem_sync(reg_t addr, void* buf, size_t n) {
   int offset = (addr - DM_BASE_ADDR) / sizeof(uint8_t);
   uint8_t* start_addr = dummy_debug->dummy_debug_mem + offset;
   memcpy(start_addr, buf, n); // TODO copy to device not addr
+}
+
+void difftest_load_flash(void *flash_bin, size_t size) {
+
 }
 
 }
