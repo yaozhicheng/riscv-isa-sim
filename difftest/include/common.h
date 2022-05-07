@@ -18,7 +18,7 @@ typedef uint64_t paddr_t;
 #define FMT_PADDR "0x%08x"
 typedef uint16_t ioaddr_t;
 
-#define CONFIG_MSIZE (8 * 1024 * 1024 * 1024UL)
+#define CONFIG_MSIZE (16 * 1024 * 1024 * 1024UL)
 
 std::vector<mem_cfg_t> parse_mem_layout(const char* arg);
 std::vector<std::pair<reg_t, mem_t*>> make_mems(const std::vector<mem_cfg_t> &layout);
