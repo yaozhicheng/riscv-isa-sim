@@ -16,32 +16,19 @@ static debug_module_config_t difftest_dm_config = {
 static csr_t_p mscratch = nullptr;
 
 struct diff_context_t {
-  word_t gpr[32];
-  word_t fpr[32];
-  word_t pc;
-  word_t mstatus;
-  word_t mcause;
-  word_t mepc;
-  word_t sstatus;
-  word_t scause;
-  word_t sepc;
-  word_t satp;
-  word_t mip;
-  word_t mie;
-  word_t mscratch;
-  word_t sscratch;
-  word_t mideleg;
-  word_t medeleg;
-  word_t mtval;
-  word_t stval;
-  word_t mtvec;
-  word_t stvec;
-  word_t priv;
-  word_t debugMode;
-  word_t dcsr;
-  word_t dpc;
-  word_t dscratch0;
-  word_t dscratch1;
+  // Below will be synced by regcpy when run difftest, DO NOT TOUCH
+  uint64_t gpr[32];
+
+  uint64_t fpr[32];
+
+  // shadow CSRs for difftest
+  uint64_t pc;
+  uint64_t mstatus, mcause, mepc;
+  uint64_t sstatus, scause, sepc;
+
+  uint64_t satp, mip, mie, mscratch, sscratch, mideleg, medeleg;
+  uint64_t mtval, stval, mtvec, stvec;
+  uint64_t mode;
 };
 
 struct diff_gpr_pc_p {
@@ -93,12 +80,7 @@ void sim_t::diff_get_regs(void* diff_context) {
   ctx->stval = state->stval->read();
   ctx->mtvec = state->mtvec->read();
   ctx->stvec = state->stvec->read();
-  ctx->priv = state->prv;
-  ctx->debugMode = state->debug_mode;
-  ctx->dcsr = state->dcsr->read();
-  ctx->dpc = state->dpc->read();
-  ctx->dscratch0 = state->csrmap[CSR_DSCRATCH0]->read();
-  ctx->dscratch1 = state->csrmap[CSR_DSCRATCH1]->read();
+  ctx->mode = state->prv;
 }
 
 void sim_t::diff_set_regs(void* diff_context) {
@@ -127,12 +109,7 @@ void sim_t::diff_set_regs(void* diff_context) {
   state->stval->write(ctx->stval);
   state->mtvec->write(ctx->mtvec);
   state->stvec->write(ctx->stvec);
-  state->prv = ctx->priv;
-  state->debug_mode = ctx->debugMode;
-  state->dcsr->write(ctx->dcsr);
-  state->dpc->write(ctx->dpc);
-  state->csrmap[CSR_DSCRATCH0]->write(ctx->dscratch0);
-  state->csrmap[CSR_DSCRATCH1]->write(ctx->dscratch1);
+  state->prv = ctx->mode;
 }
 
 void sim_t::diff_memcpy(reg_t dest, void* src, size_t n) {
