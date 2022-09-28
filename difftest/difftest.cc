@@ -210,7 +210,7 @@ void difftest_uarchstatus_cpy(void *dut, bool direction) {
 }
 
 void update_dynamic_config(void* config) {
-
+  p->enable_log_commits();
 }
 
 void difftest_exec(uint64_t n) {
@@ -257,10 +257,13 @@ void difftest_init(int port) {
     // const debug_module_config_t &dm_config
     difftest_dm_config,
     // const char *log_path
-    nullptr,
+    DIFFTEST_LOG_FILE,
     //bool dtb_enabled, const char *dtb_file, FILE *cmd_file
     false, nullptr, nullptr);
   s->diff_init(port);
+#ifdef RISCV_ENABLE_COMMITLOG
+  setvbuf(p->get_log_file(), NULL, _IONBF, 0);
+#endif
 }
 
 void difftest_raise_intr(uint64_t NO) {
