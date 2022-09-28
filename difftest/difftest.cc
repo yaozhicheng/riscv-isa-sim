@@ -210,7 +210,9 @@ void difftest_uarchstatus_cpy(void *dut, bool direction) {
 }
 
 void update_dynamic_config(void* config) {
+#ifdef RISCV_ENABLE_COMMITLOG
   p->enable_log_commits();
+#endif
 }
 
 void difftest_exec(uint64_t n) {
