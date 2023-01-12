@@ -37,6 +37,23 @@ struct diff_context_t {
   word_t mtvec;
   word_t stvec;
   word_t priv;
+  word_t v;
+  word_t mtval2;
+  word_t mtinst;
+  word_t hstatus;
+  word_t hideleg;
+  word_t hedeleg;
+  word_t hcounteren;
+  word_t htval;
+  word_t htinst;
+  word_t hgatp;
+  word_t vsstatus;
+  word_t vstvec;
+  word_t vsepc;
+  word_t vscause;
+  word_t vstval;
+  word_t vsatp;
+  word_t vsscratch;
   word_t debugMode;
   word_t dcsr;
   word_t dpc;
@@ -99,6 +116,23 @@ void sim_t::diff_get_regs(void* diff_context) {
   ctx->dpc = state->dpc->read();
   ctx->dscratch0 = state->csrmap[CSR_DSCRATCH0]->read();
   ctx->dscratch1 = state->csrmap[CSR_DSCRATCH1]->read();
+  ctx->v = state->v;
+  ctx->vsscratch = state->csrmap[CSR_VSSCRATCH]->read();
+  ctx->mtval2 = state->mtval2->read();
+  ctx->mtinst = state->mtinst->read();
+  ctx->hstatus = state->hstatus->read();
+  ctx->hideleg = state->hideleg->read();
+  ctx->hedeleg = state->hedeleg->read();
+  ctx->hcounteren = state->hcounteren->read();
+  ctx->htval = state->htval->read();
+  ctx->htinst = state->htinst->read();
+  ctx->hgatp = state->hgatp->read();
+  ctx->vsstatus = state->vsstatus->read();
+  ctx->vstvec = state->vstvec->read();
+  ctx->vsepc = state->vsepc->read();
+  ctx->vscause = state->vscause->read();
+  ctx->vstval = state->vstval->read();
+  ctx->vsatp = state->vsatp->read();
 }
 
 void sim_t::diff_set_regs(void* diff_context) {
@@ -133,6 +167,23 @@ void sim_t::diff_set_regs(void* diff_context) {
   state->dpc->write(ctx->dpc);
   state->csrmap[CSR_DSCRATCH0]->write(ctx->dscratch0);
   state->csrmap[CSR_DSCRATCH1]->write(ctx->dscratch1);
+  state->v = ctx->v;
+  state->csrmap[CSR_VSSCRATCH]->write(ctx->vsscratch);
+  state->mtval2->write(ctx->mtval2);
+  state->mtinst->write(ctx->mtinst);
+  state->hstatus->write(ctx->hstatus);
+  state->hideleg->write(ctx->hideleg);
+  state->hedeleg->write(ctx->hedeleg);
+  state->hcounteren->write(ctx->hcounteren);
+  state->htval->write(ctx->htval);
+  state->htinst->write(ctx->htinst);
+  state->hgatp->write(ctx->hgatp);
+  state->vsstatus->write(ctx->vsstatus);
+  state->vstvec->write(ctx->vstvec);
+  state->vsepc->write(ctx->vsepc);
+  state->vscause->write(ctx->vscause);
+  state->vstval->write(ctx->vstval);
+  state->vsatp->write(ctx->vsatp);
 }
 
 void sim_t::diff_memcpy(reg_t dest, void* src, size_t n) {
@@ -179,7 +230,16 @@ void sim_t::diff_display() {
       state->mideleg->read(), state->medeleg->read());
   printf("mtval: " FMT_WORD " stval: " FMT_WORD " mtvec: " FMT_WORD " stvec: " FMT_WORD "\n",
       state->mtval->read(), state->stval->read(), state->mtvec->read(), state->stvec->read());
+  printf("mtval2: " FMT_WORD " mtinst: " FMT_WORD " hstatus: " FMT_WORD " hideleg: " FMT_WORD "\n",
+      state->mtval2->read(), state->mtinst->read(), state->hstatus->read(), state->hideleg->read());
+  printf("hedeleg: " FMT_WORD " hcounteren: " FMT_WORD " htval: " FMT_WORD " htinst: " FMT_WORD "\n",
+      state->hedeleg->read(), state->hcounteren->read(), state->htval->read(), state->htinst->read());
+  printf("hgatp: " FMT_WORD "vsscratch: " FMT_WORD " vsstatus: " FMT_WORD " vstvec: " FMT_WORD "\n",
+      state->hgatp->read(), state->csrmap[CSR_VSSCRATCH]->read(), state->vsstatus->read(), state->vstvec->read());
+  printf("vsepc: " FMT_WORD " vscause: " FMT_WORD " vstval: " FMT_WORD " vsatp: " FMT_WORD "\n",
+      state->vsepc->read(), state->vscause->read(), state->vstval->read(), state->vsatp->read());
   printf("privilege mode:%ld\n", state->prv);
+  printf("virtualization mode: %d\n", state->v);
   fflush(stdout);
 }
 
@@ -273,8 +333,8 @@ void difftest_raise_intr(uint64_t NO) {
     s->diff_debugmode();  // Debug Intr
   } else {
     uint64_t mip_bit = 0x1UL << (NO & 0xf);
-    bool is_timer_interrupt = mip_bit & 0xa0UL;
-    bool is_external_interrupt = mip_bit & 0xb00UL;
+    bool is_timer_interrupt = mip_bit & 0xe0UL;
+    bool is_external_interrupt = mip_bit & 0xf00UL;
     bool from_outside = !(mip_bit & state->mip->read());
     bool external_set = (is_timer_interrupt || is_external_interrupt) && from_outside;
     if (external_set) {
