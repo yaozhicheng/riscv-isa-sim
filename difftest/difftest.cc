@@ -92,6 +92,8 @@ void sim_t::diff_get_regs(void* diff_context) {
   for (int i = 0; i < NFPR; i++) {
     ctx->fpr[i] = unboxF64(state->FPR[i]);
   }
+  bool temp_v = state->v;
+  state->v = false;
   ctx->pc = state->pc;
   ctx->mstatus = state->mstatus->read();
   ctx->mcause = state->mcause->read();
@@ -116,7 +118,7 @@ void sim_t::diff_get_regs(void* diff_context) {
   ctx->dpc = state->dpc->read();
   ctx->dscratch0 = state->csrmap[CSR_DSCRATCH0]->read();
   ctx->dscratch1 = state->csrmap[CSR_DSCRATCH1]->read();
-  ctx->v = state->v;
+  ctx->v = temp_v;
   ctx->vsscratch = state->csrmap[CSR_VSSCRATCH]->read();
   ctx->mtval2 = state->mtval2->read();
   ctx->mtinst = state->mtinst->read();
@@ -133,6 +135,7 @@ void sim_t::diff_get_regs(void* diff_context) {
   ctx->vscause = state->vscause->read();
   ctx->vstval = state->vstval->read();
   ctx->vsatp = state->vsatp->read();
+  state->v = temp_v;
 }
 
 void sim_t::diff_set_regs(void* diff_context) {
@@ -293,7 +296,7 @@ void difftest_init(int port) {
     // const char *default_bootargs,
     nullptr,
     // const char *default_isa,
-    "RV64IMAFDC_zba_zbb_zbc_zbs_zbkb_zbkc_zbkx_zknd_zkne_zknh_zksed_zksh_svinval",
+    "RV64IMAFDCH_zba_zbb_zbc_zbs_zbkb_zbkc_zbkx_zknd_zkne_zknh_zksed_zksh_svinval",
     // const char *default_priv
     DEFAULT_PRIV,
     // const char *default_varch,
