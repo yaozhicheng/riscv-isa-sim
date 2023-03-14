@@ -218,6 +218,14 @@ bool processor_t::slow_path()
   return debug || state.single_step != state.STEP_NONE || state.debug_mode;
 }
 
+void processor_t::execute_instruction(uint64_t insn)
+{
+    reg_t pc = state.pc;
+    insn_fetch_t fetch = mmu->decode_insn(insn);
+    pc = execute_insn(this, pc, fetch);
+    state.pc = pc;
+}
+
 // fetch/decode/execute loop
 void processor_t::step(size_t n)
 {

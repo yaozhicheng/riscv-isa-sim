@@ -232,7 +232,7 @@ private:
 #define FRS3 READ_FREG(insn.rs3())
 #define dirty_fp_state  STATE.sstatus->dirty(SSTATUS_FS)
 #define dirty_ext_state STATE.sstatus->dirty(SSTATUS_XS)
-#define dirty_vs_state  STATE.sstatus->dirty(SSTATUS_VS)
+#define dirty_vs_state  ;
 #define DO_WRITE_FREG(reg, value) (STATE.FPR.write(reg, value), dirty_fp_state)
 #define WRITE_FRD(value) WRITE_FREG(insn.rd(), value)
  
@@ -254,9 +254,9 @@ private:
 #define require_extension(s) require(p->extension_enabled(s))
 #define require_either_extension(A,B) require(p->extension_enabled(A) || p->extension_enabled(B));
 #define require_impl(s) require(p->supports_impl(s))
-#define require_fp          require(STATE.sstatus->enabled(SSTATUS_FS))
+#define require_fp          ;
 #define require_accelerator require(STATE.sstatus->enabled(SSTATUS_XS))
-#define require_vector_vs   require(STATE.sstatus->enabled(SSTATUS_VS))
+#define require_vector_vs   ;
 #define require_vector(alu) \
   do { \
     require_vector_vs; \
@@ -293,10 +293,7 @@ private:
       throw trap_virtual_instruction(insn.bits()); \
   } while (0);
 
-#define set_fp_exceptions ({ if (softfloat_exceptionFlags) { \
-                               STATE.fflags->write(STATE.fflags->read() | softfloat_exceptionFlags); \
-                             } \
-                             softfloat_exceptionFlags = 0; })
+#define set_fp_exceptions ;
 
 #define sext32(x) ((sreg_t)(int32_t)(x))
 #define zext32(x) ((reg_t)(uint32_t)(x))

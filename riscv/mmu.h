@@ -359,6 +359,11 @@ public:
     return refill_icache(addr, &entry)->data;
   }
 
+  inline insn_fetch_t decode_insn(uint64_t insn) {
+    insn_fetch_t fetch = {proc->decode_insn(insn), insn};
+    return fetch;
+  }
+
   void flush_tlb();
   void flush_icache();
 

@@ -242,6 +242,7 @@ public:
   bool get_log_commits_enabled() const { return log_commits_enabled; }
 #endif
   void reset();
+  void execute_instruction(uint64_t insn);
   void step(size_t n); // run for n cycles
   void put_csr(int which, reg_t val);
   uint32_t get_id() const { return id; }
