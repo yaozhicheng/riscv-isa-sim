@@ -165,11 +165,11 @@ void sim_t::diff_set_regs(void* diff_context) {
   state->mtvec->write(ctx->mtvec);
   state->stvec->write(ctx->stvec);
   state->prv = ctx->priv;
-  state->debug_mode = ctx->debugMode;
-  state->dcsr->write(ctx->dcsr);
-  state->dpc->write(ctx->dpc);
-  state->csrmap[CSR_DSCRATCH0]->write(ctx->dscratch0);
-  state->csrmap[CSR_DSCRATCH1]->write(ctx->dscratch1);
+  // state->debug_mode = ctx->debugMode;
+  // state->dcsr->write(ctx->dcsr);
+  // state->dpc->write(ctx->dpc);
+  // state->csrmap[CSR_DSCRATCH0]->write(ctx->dscratch0);
+  // state->csrmap[CSR_DSCRATCH1]->write(ctx->dscratch1);
   state->v = ctx->v;
   state->csrmap[CSR_VSSCRATCH]->write(ctx->vsscratch);
   state->mtval2->write(ctx->mtval2);
