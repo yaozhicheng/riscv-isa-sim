@@ -2,7 +2,7 @@
 #include "include/difftest-def.h"
 #include "include/dummy_debug.h"
 #include "disasm.h"
-
+#include "decode_macros.h"
 static debug_module_config_t difftest_dm_config = {
   .progbufsize = 2,
   .max_sba_data_width = 0,
@@ -192,7 +192,7 @@ void sim_t::diff_set_regs(void* diff_context) {
 void sim_t::diff_memcpy(reg_t dest, void* src, size_t n) {
   mmu_t* mmu = p->get_mmu();
   for (size_t i = 0; i < n; i++) {
-    mmu->store_uint8(dest+i, *((uint8_t*)src+i));
+    mmu->store<uint8_t>(dest+i, *((uint8_t*)src+i));
   }
 }
 
@@ -301,12 +301,20 @@ void difftest_init(int port) {
     DEFAULT_PRIV,
     // const char *default_varch,
     DEFAULT_VARCH,
+    // const bool default_misaligned,
+    false,
+    // const endianness_t default_endianness,
+    endianness_little,
+    // const reg_t default_pmpregions,
+    16,
     // const std::vector<mem_cfg_t> &default_mem_layout,
     memory_layout,
     // const std::vector<int> default_hartids,
-    std::vector<int>{0},
+    std::vector<size_t>{0},
     // bool default_real_time_clint
-    false
+    false,
+    // const reg_t default_trigger_count
+    4
   );
   s = new sim_t(
     // const cfg_t *cfg,
@@ -323,8 +331,12 @@ void difftest_init(int port) {
     difftest_dm_config,
     // const char *log_path
     DIFFTEST_LOG_FILE,
-    //bool dtb_enabled, const char *dtb_file, FILE *cmd_file
-    false, nullptr, nullptr);
+    // bool dtb_enabled, const char *dtb_file 
+    true, nullptr, 
+    // bool socket_enabled
+    false,
+    // FILE *cmd_file
+    nullptr);
   s->diff_init(port);
 #ifdef RISCV_ENABLE_COMMITLOG
   setvbuf(p->get_log_file(), NULL, _IONBF, 0);

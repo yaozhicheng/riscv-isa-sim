@@ -1,20 +1,24 @@
 // See LICENSE for license details.
 
+#include "config.h"
 #include "mmu.h"
 #include "arith.h"
 #include "simif.h"
 #include "processor.h"
 
-mmu_t::mmu_t(simif_t* sim, processor_t* proc)
+mmu_t::mmu_t(simif_t* sim, endianness_t endianness, processor_t* proc)
  : sim(sim), proc(proc),
 #ifdef RISCV_ENABLE_DUAL_ENDIAN
-  target_big_endian(false),
+  target_big_endian(endianness == endianness_big),
 #endif
   check_triggers_fetch(false),
   check_triggers_load(false),
   check_triggers_store(false),
   matched_trigger(NULL)
 {
+#ifndef RISCV_ENABLE_DUAL_ENDIAN
+  assert(endianness == endianness_little);
+#endif
   flush_tlb();
   yield_load_reservation();
 }
@@ -38,7 +42,7 @@ void mmu_t::flush_tlb()
   flush_icache();
 }
 
-static void throw_access_exception(bool virt, reg_t addr, access_type type)
+void throw_access_exception(bool virt, reg_t addr, access_type type)
 {
   switch (type) {
     case FETCH: throw trap_instruction_access_fault(virt, addr, 0, 0);
@@ -48,27 +52,17 @@ static void throw_access_exception(bool virt, reg_t addr, access_type type)
   }
 }
 
-reg_t mmu_t::translate(reg_t addr, reg_t len, access_type type, uint32_t xlate_flags)
+reg_t mmu_t::translate(mem_access_info_t access_info, reg_t len)
 {
+  reg_t addr = access_info.vaddr;
+  access_type type = access_info.type;
   if (!proc)
     return addr;
 
-  bool virt = proc->state.v;
-  bool hlvx = xlate_flags & RISCV_XLATE_VIRT_HLVX;
-  reg_t mode = proc->state.prv;
-  if (type != FETCH) {
-    if (!proc->state.debug_mode && get_field(proc->state.mstatus->read(), MSTATUS_MPRV)) {
-      mode = get_field(proc->state.mstatus->read(), MSTATUS_MPP);
-      if (get_field(proc->state.mstatus->read(), MSTATUS_MPV) && mode != PRV_M)
-        virt = true;
-    }
-    if (xlate_flags & RISCV_XLATE_VIRT) {
-      virt = true;
-      mode = get_field(proc->state.hstatus->read(), HSTATUS_SPVP);
-    }
-  }
+  bool virt = access_info.effective_virt;
+  reg_t mode = (reg_t) access_info.effective_priv;
 
-  reg_t paddr = walk(addr, type, mode, virt, hlvx) | (addr & (PGSIZE-1));
+  reg_t paddr = walk(access_info) | (addr & (PGSIZE-1));
   if (!pmp_ok(paddr, len, type, mode))
     throw_access_exception(virt, addr, type);
   return paddr;
@@ -76,16 +70,27 @@ reg_t mmu_t::translate(reg_t addr, reg_t len, access_type type, uint32_t xlate_f
 
 tlb_entry_t mmu_t::fetch_slow_path(reg_t vaddr)
 {
-  reg_t paddr = translate(vaddr, sizeof(fetch_temp), FETCH, 0);
+  auto access_info = generate_access_info(vaddr, FETCH, {false, false, false});
+  check_triggers(triggers::OPERATION_EXECUTE, vaddr, access_info.effective_virt);
 
-  if (auto host_addr = sim->addr_to_mem(paddr)) {
-    return refill_tlb(vaddr, paddr, host_addr, FETCH);
+  tlb_entry_t result;
+  reg_t vpn = vaddr >> PGSHIFT;
+  if (unlikely(tlb_insn_tag[vpn % TLB_ENTRIES] != (vpn | TLB_CHECK_TRIGGERS))) {
+    reg_t paddr = translate(access_info, sizeof(fetch_temp));
+    if (auto host_addr = sim->addr_to_mem(paddr)) {
+      result = refill_tlb(vaddr, paddr, host_addr, FETCH);
+    } else {
+      if (!mmio_fetch(paddr, sizeof fetch_temp, (uint8_t*)&fetch_temp))
+        throw trap_instruction_access_fault(proc->state.v, vaddr, 0, 0);
+      result = {(char*)&fetch_temp - vaddr, paddr - vaddr};
+    }
   } else {
-    if (!mmio_load(paddr, sizeof fetch_temp, (uint8_t*)&fetch_temp))
-      throw trap_instruction_access_fault(proc->state.v, vaddr, 0, 0);
-    tlb_entry_t entry = {(char*)&fetch_temp - vaddr, paddr - vaddr};
-    return entry;
+    result = tlb_data[vpn % TLB_ENTRIES];
   }
+
+  check_triggers(triggers::OPERATION_EXECUTE, vaddr, access_info.effective_virt, from_le(*(const uint16_t*)(result.host_offset + vaddr)));
+
+  return result;
 }
 
 reg_t reg_from_bytes(size_t len, const uint8_t* bytes)
@@ -114,74 +119,179 @@ reg_t reg_from_bytes(size_t len, const uint8_t* bytes)
   abort();
 }
 
-bool mmu_t::mmio_ok(reg_t addr, access_type type)
+bool mmu_t::mmio_ok(reg_t paddr, access_type UNUSED type)
 {
   // Disallow access to debug region when not in debug mode
-  if (addr >= DEBUG_START && addr <= DEBUG_END && proc && !proc->state.debug_mode)
+  if (paddr >= DEBUG_START && paddr <= DEBUG_END && proc && !proc->state.debug_mode)
     return false;
 
   return true;
 }
 
-bool mmu_t::mmio_load(reg_t addr, size_t len, uint8_t* bytes)
+bool mmu_t::mmio_fetch(reg_t paddr, size_t len, uint8_t* bytes)
 {
-  if (!mmio_ok(addr, LOAD))
+  if (!mmio_ok(paddr, FETCH))
     return false;
 
-  return sim->mmio_load(addr, len, bytes);
+  return sim->mmio_fetch(paddr, len, bytes);
 }
 
-bool mmu_t::mmio_store(reg_t addr, size_t len, const uint8_t* bytes)
+bool mmu_t::mmio_load(reg_t paddr, size_t len, uint8_t* bytes)
 {
-  if (!mmio_ok(addr, STORE))
-    return false;
-
-  return sim->mmio_store(addr, len, bytes);
+  return mmio(paddr, len, bytes, LOAD);
 }
 
-void mmu_t::load_slow_path(reg_t addr, reg_t len, uint8_t* bytes, uint32_t xlate_flags)
+bool mmu_t::mmio_store(reg_t paddr, size_t len, const uint8_t* bytes)
 {
-  reg_t paddr = translate(addr, len, LOAD, xlate_flags);
+  return mmio(paddr, len, const_cast<uint8_t*>(bytes), STORE);
+}
+
+bool mmu_t::mmio(reg_t paddr, size_t len, uint8_t* bytes, access_type type)
+{
+  bool power_of_2 = (len & (len - 1)) == 0;
+  bool naturally_aligned = (paddr & (len - 1)) == 0;
+
+  if (power_of_2 && naturally_aligned) {
+    if (!mmio_ok(paddr, type))
+      return false;
+
+    if (type == STORE)
+      return sim->mmio_store(paddr, len, bytes);
+    else
+      return sim->mmio_load(paddr, len, bytes);
+  }
+
+  for (size_t i = 0; i < len; i++) {
+    if (!mmio(paddr + i, 1, bytes + i, type))
+      return false;
+  }
+
+  return true;
+}
+
+void mmu_t::check_triggers(triggers::operation_t operation, reg_t address, bool virt, std::optional<reg_t> data)
+{
+  if (matched_trigger || !proc)
+    return;
+
+  auto match = proc->TM.detect_memory_access_match(operation, address, data);
+
+  if (match.has_value())
+    switch (match->timing) {
+      case triggers::TIMING_BEFORE:
+        throw triggers::matched_t(operation, address, match->action, virt);
+
+      case triggers::TIMING_AFTER:
+        // We want to take this exception on the next instruction.  We check
+        // whether to do so in the I$ refill path, so flush the I$.
+        flush_icache();
+        matched_trigger = new triggers::matched_t(operation, address, match->action, virt);
+    }
+}
+
+void mmu_t::load_slow_path_intrapage(reg_t len, uint8_t* bytes, mem_access_info_t access_info)
+{
+  reg_t addr = access_info.vaddr;
+  reg_t vpn = addr >> PGSHIFT;
+  if (!access_info.flags.is_special_access() && vpn == (tlb_load_tag[vpn % TLB_ENTRIES] & ~TLB_CHECK_TRIGGERS)) {
+    auto host_addr = tlb_data[vpn % TLB_ENTRIES].host_offset + addr;
+    memcpy(bytes, host_addr, len);
+    return;
+  }
+
+  reg_t paddr = translate(access_info, len);
+
+  if (access_info.flags.lr && !sim->reservable(paddr)) {
+    throw trap_load_access_fault(access_info.effective_virt, addr, 0, 0);
+  }
 
   if (auto host_addr = sim->addr_to_mem(paddr)) {
     memcpy(bytes, host_addr, len);
     if (tracer.interested_in_range(paddr, paddr + PGSIZE, LOAD))
       tracer.trace(paddr, len, LOAD);
-    else if (xlate_flags == 0)
+    else if (!access_info.flags.is_special_access())
       refill_tlb(addr, paddr, host_addr, LOAD);
+
   } else if (!mmio_load(paddr, len, bytes)) {
-    throw trap_load_access_fault((proc) ? proc->state.v : false, addr, 0, 0);
+    throw trap_load_access_fault(access_info.effective_virt, addr, 0, 0);
   }
 
-  if (!matched_trigger) {
-    reg_t data = reg_from_bytes(len, bytes);
-    matched_trigger = trigger_exception(triggers::OPERATION_LOAD, addr, data);
-    if (matched_trigger)
-      throw *matched_trigger;
+  if (access_info.flags.lr) {
+    load_reservation_address = paddr;
   }
 }
 
-void mmu_t::store_slow_path(reg_t addr, reg_t len, const uint8_t* bytes, uint32_t xlate_flags, bool actually_store)
+void mmu_t::load_slow_path(reg_t addr, reg_t len, uint8_t* bytes, xlate_flags_t xlate_flags)
 {
-  reg_t paddr = translate(addr, len, STORE, xlate_flags);
+  auto access_info = generate_access_info(addr, LOAD, xlate_flags);
+  check_triggers(triggers::OPERATION_LOAD, addr, access_info.effective_virt);
 
-  if (!matched_trigger) {
-    reg_t data = reg_from_bytes(len, bytes);
-    matched_trigger = trigger_exception(triggers::OPERATION_STORE, addr, data);
-    if (matched_trigger)
-      throw *matched_trigger;
+  if ((addr & (len - 1)) == 0) {
+    load_slow_path_intrapage(len, bytes, access_info);
+  } else {
+    bool gva = access_info.effective_virt;
+    if (!is_misaligned_enabled())
+      throw trap_load_address_misaligned(gva, addr, 0, 0);
+
+    if (access_info.flags.lr)
+      throw trap_load_access_fault(gva, addr, 0, 0);
+
+    reg_t len_page0 = std::min(len, PGSIZE - addr % PGSIZE);
+    load_slow_path_intrapage(len_page0, bytes, access_info);
+    if (len_page0 != len)
+      load_slow_path_intrapage(len - len_page0, bytes + len_page0, access_info.split_misaligned_access(len_page0));
   }
+
+  check_triggers(triggers::OPERATION_LOAD, addr, access_info.effective_virt, reg_from_bytes(len, bytes));
+}
+
+void mmu_t::store_slow_path_intrapage(reg_t len, const uint8_t* bytes, mem_access_info_t access_info, bool actually_store)
+{
+  reg_t addr = access_info.vaddr;
+  reg_t vpn = addr >> PGSHIFT;
+  if (!access_info.flags.is_special_access() && vpn == (tlb_store_tag[vpn % TLB_ENTRIES] & ~TLB_CHECK_TRIGGERS)) {
+    if (actually_store) {
+      auto host_addr = tlb_data[vpn % TLB_ENTRIES].host_offset + addr;
+      memcpy(host_addr, bytes, len);
+    }
+    return;
+  }
+
+  reg_t paddr = translate(access_info, len);
 
   if (actually_store) {
     if (auto host_addr = sim->addr_to_mem(paddr)) {
       memcpy(host_addr, bytes, len);
       if (tracer.interested_in_range(paddr, paddr + PGSIZE, STORE))
         tracer.trace(paddr, len, STORE);
-      else if (xlate_flags == 0)
+      else if (!access_info.flags.is_special_access())
         refill_tlb(addr, paddr, host_addr, STORE);
     } else if (!mmio_store(paddr, len, bytes)) {
-      throw trap_store_access_fault((proc) ? proc->state.v : false, addr, 0, 0);
+      throw trap_store_access_fault(access_info.effective_virt, addr, 0, 0);
     }
+  }
+}
+
+void mmu_t::store_slow_path(reg_t addr, reg_t len, const uint8_t* bytes, xlate_flags_t xlate_flags, bool actually_store, bool UNUSED require_alignment)
+{
+  auto access_info = generate_access_info(addr, STORE, xlate_flags);
+  if (actually_store)
+    check_triggers(triggers::OPERATION_STORE, addr, access_info.effective_virt, reg_from_bytes(len, bytes));
+
+  if (addr & (len - 1)) {
+    bool gva = access_info.effective_virt;
+    if (!is_misaligned_enabled())
+      throw trap_store_address_misaligned(gva, addr, 0, 0);
+
+    if (require_alignment)
+      throw trap_store_access_fault(gva, addr, 0, 0);
+
+    reg_t len_page0 = std::min(len, PGSIZE - addr % PGSIZE);
+    store_slow_path_intrapage(len_page0, bytes, access_info, actually_store);
+    if (len_page0 != len)
+      store_slow_path_intrapage(len - len_page0, bytes + len_page0, access_info.split_misaligned_access(len_page0), actually_store);
+  } else {
+    store_slow_path_intrapage(len, bytes, access_info, actually_store);
   }
 }
 
@@ -192,7 +302,7 @@ tlb_entry_t mmu_t::refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_
 
   tlb_entry_t entry = {host_addr - vaddr, paddr - vaddr};
 
-  if (proc && get_field(proc->state.mstatus->read(), MSTATUS_MPRV))
+  if (in_mprv())
     return entry;
 
   if ((tlb_load_tag[idx] & ~TLB_CHECK_TRIGGERS) != expected_tag)
@@ -242,7 +352,11 @@ bool mmu_t::pmp_ok(reg_t addr, reg_t len, access_type type, reg_t mode)
     }
   }
 
-  return mode == PRV_M;
+  // in case matching region is not found
+  const bool mseccfg_mml = proc->state.mseccfg->get_mml();
+  const bool mseccfg_mmwp = proc->state.mseccfg->get_mmwp();
+  return ((mode == PRV_M) && !mseccfg_mmwp
+          && (!mseccfg_mml || ((type == LOAD) || (type == STORE))));
 }
 
 reg_t mmu_t::pmp_homogeneous(reg_t addr, reg_t len)
@@ -283,19 +397,18 @@ reg_t mmu_t::s2xlate(reg_t gva, reg_t gpa, access_type type, access_type trap_ty
 
       // check that physical address of PTE is legal
       auto pte_paddr = base + idx * vm.ptesize;
-      auto ppte = sim->addr_to_mem(pte_paddr);
-      if (!ppte || !pmp_ok(pte_paddr, vm.ptesize, LOAD, PRV_S)) {
-        throw_access_exception(virt, gva, trap_type);
-      }
-
-      reg_t pte = vm.ptesize == 4 ? from_target(*(target_endian<uint32_t>*)ppte) : from_target(*(target_endian<uint64_t>*)ppte);
+      reg_t pte = pte_load(pte_paddr, gva, virt, trap_type, vm.ptesize);
       reg_t ppn = (pte & ~reg_t(PTE_ATTR)) >> PTE_PPN_SHIFT;
+      bool pbmte = proc->get_state()->menvcfg->read() & MENVCFG_PBMTE;
+      bool hade = proc->get_state()->menvcfg->read() & MENVCFG_HADE;
 
       if (pte & PTE_RSVD) {
         break;
       } else if (!proc->extension_enabled(EXT_SVNAPOT) && (pte & PTE_N)) {
         break;
-      } else if (!proc->extension_enabled(EXT_SVPBMT) && (pte & PTE_PBMT)) {
+      } else if (!pbmte && (pte & PTE_PBMT)) {
+        break;
+      } else if ((pte & PTE_PBMT) == PTE_PBMT) {
         break;
       } else if (PTE_TABLE(pte)) { // next level of page table
         if (pte & (PTE_D | PTE_A | PTE_U | PTE_N | PTE_PBMT))
@@ -313,18 +426,17 @@ reg_t mmu_t::s2xlate(reg_t gva, reg_t gpa, access_type type, access_type trap_ty
         break;
       } else {
         reg_t ad = PTE_A | ((type == STORE) * PTE_D);
-#ifdef RISCV_ENABLE_DIRTY
-        // set accessed and possibly dirty bits.
+
         if ((pte & ad) != ad) {
-          if (!pmp_ok(pte_paddr, vm.ptesize, STORE, PRV_S))
-            throw_access_exception(virt, gva, trap_type);
-          *(target_endian<uint32_t>*)ppte |= to_target((uint32_t)ad);
+          if (hade) {
+            // set accessed and possibly dirty bits
+            pte_store(pte_paddr, pte | ad, gva, virt, type, vm.ptesize);
+          } else {
+            // take exception if access or possibly dirty bit is not set.
+            break;
+          }
         }
-#else
-        // take exception if access or possibly dirty bit is not set.
-        if ((pte & ad) != ad)
-          break;
-#endif
+
         reg_t vpn = gpa >> PGSHIFT;
         reg_t page_mask = (reg_t(1) << PGSHIFT) - 1;
 
@@ -348,8 +460,13 @@ reg_t mmu_t::s2xlate(reg_t gva, reg_t gpa, access_type type, access_type trap_ty
   }
 }
 
-reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool hlvx)
+reg_t mmu_t::walk(mem_access_info_t access_info)
 {
+  access_type type = access_info.type;
+  reg_t addr = access_info.vaddr;
+  bool virt = access_info.effective_virt;
+  bool hlvx = access_info.flags.hlvx;
+  reg_t mode = access_info.effective_priv;
   reg_t page_mask = (reg_t(1) << PGSHIFT) - 1;
   reg_t satp = proc->get_state()->satp->readvirt(virt);
   vm_info vm = decode_vm_info(proc->get_const_xlen(), false, mode, satp);
@@ -374,18 +491,18 @@ reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool hlvx
 
     // check that physical address of PTE is legal
     auto pte_paddr = s2xlate(addr, base + idx * vm.ptesize, LOAD, type, virt, false);
-    auto ppte = sim->addr_to_mem(pte_paddr);
-    if (!ppte || !pmp_ok(pte_paddr, vm.ptesize, LOAD, PRV_S))
-      throw_access_exception(virt, addr, type);
-
-    reg_t pte = vm.ptesize == 4 ? from_target(*(target_endian<uint32_t>*)ppte) : from_target(*(target_endian<uint64_t>*)ppte);
+    reg_t pte = pte_load(pte_paddr, addr, virt, type, vm.ptesize);
     reg_t ppn = (pte & ~reg_t(PTE_ATTR)) >> PTE_PPN_SHIFT;
+    bool pbmte = virt ? (proc->get_state()->henvcfg->read() & HENVCFG_PBMTE) : (proc->get_state()->menvcfg->read() & MENVCFG_PBMTE);
+    bool hade = virt ? (proc->get_state()->henvcfg->read() & HENVCFG_HADE) : (proc->get_state()->menvcfg->read() & MENVCFG_HADE);
 
     if (pte & PTE_RSVD) {
       break;
     } else if (!proc->extension_enabled(EXT_SVNAPOT) && (pte & PTE_N)) {
       break;
-    } else if (!proc->extension_enabled(EXT_SVPBMT) && (pte & PTE_PBMT)) {
+    } else if (!pbmte && (pte & PTE_PBMT)) {
+      break;
+    } else if ((pte & PTE_PBMT) == PTE_PBMT) {
       break;
     } else if (PTE_TABLE(pte)) { // next level of page table
       if (pte & (PTE_D | PTE_A | PTE_U | PTE_N | PTE_PBMT))
@@ -403,18 +520,17 @@ reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool hlvx
       break;
     } else {
       reg_t ad = PTE_A | ((type == STORE) * PTE_D);
-#ifdef RISCV_ENABLE_DIRTY
-      // set accessed and possibly dirty bits.
+
       if ((pte & ad) != ad) {
-        if (!pmp_ok(pte_paddr, vm.ptesize, STORE, PRV_S))
-          throw_access_exception(virt, addr, type);
-        *(target_endian<uint32_t>*)ppte |= to_target((uint32_t)ad);
+        if (hade) {
+          // set accessed and possibly dirty bits.
+          pte_store(pte_paddr, pte | ad, addr, virt, type, vm.ptesize);
+        } else {
+          // take exception if access or possibly dirty bit is not set.
+          break;
+        }
       }
-#else
-      // take exception if access or possibly dirty bit is not set.
-      if ((pte & ad) != ad)
-        break;
-#endif
+
       // for superpage or Svnapot NAPOT mappings, make a fake leaf PTE for the TLB's benefit.
       reg_t vpn = addr >> PGSHIFT;
 

@@ -109,6 +109,10 @@ static void sdcard_io_handler(uint32_t offset, int len, bool is_write) {
   // Log("offset = 0x%x(idx = %d), is_write = %d, data = 0x%x", offset, idx, is_write, base[idx]);
 }
 
+sdcard_t::sdcard_t(unsigned long size): sz(size){
+  
+}
+
 void sdcard_t::init() {
   base = (uint32_t *)malloc(0x80);
   memset(base, 0, 0x80);

@@ -1,5 +1,5 @@
 #include "include/common.h"
-
+#include "mmu.h"
 
 /**
  * These functions are brought from spike_main/spike.cc.
