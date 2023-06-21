@@ -114,10 +114,10 @@ void sim_t::diff_get_regs(void* diff_context) {
   ctx->stvec = state->stvec->read();
   ctx->priv = state->prv;
   ctx->debugMode = state->debug_mode;
-  ctx->dcsr = state->dcsr->read();
-  ctx->dpc = state->dpc->read();
-  ctx->dscratch0 = state->csrmap[CSR_DSCRATCH0]->read();
-  ctx->dscratch1 = state->csrmap[CSR_DSCRATCH1]->read();
+  // ctx->dcsr = state->dcsr->read();
+  // ctx->dpc = state->dpc->read();
+  // ctx->dscratch0 = state->csrmap[CSR_DSCRATCH0]->read();
+  // ctx->dscratch1 = state->csrmap[CSR_DSCRATCH1]->read();
   ctx->v = temp_v;
   ctx->vsscratch = state->csrmap[CSR_VSSCRATCH]->read();
   ctx->mtval2 = state->mtval2->read();
