@@ -53,7 +53,6 @@ public:
     return base + size - 1;
   }
 
-private:
   reg_t base;
   reg_t size;
 };

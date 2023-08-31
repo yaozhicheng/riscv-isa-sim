@@ -59,9 +59,9 @@ std::string make_dts(size_t insns_per_rtc_tick, size_t cpu_hz,
          "      status = \"okay\";\n"
          "      compatible = \"riscv\";\n"
          "      riscv,isa = \"" << procs[i]->get_isa().get_isa_string() << "\";\n"
-         "      mmu-type = \"riscv," << (procs[i]->get_isa().get_max_xlen() <= 32 ? "sv32" : "sv57") << "\";\n"
+         "      mmu-type = \"riscv," << (procs[i]->get_isa().get_max_xlen() <= 32 ? "sv32" : "sv39") << "\";\n"
          "      riscv,pmpregions = <" << pmpregions << ">;\n"
-         "      riscv,pmpgranularity = <" << (1 << PMP_SHIFT) << ">;\n"
+         "      riscv,pmpgranularity = <4096>;\n"
          "      clock-frequency = <" << cpu_hz << ">;\n"
          "      CPU" << i << "_intc: interrupt-controller {\n"
          "        #address-cells = <2>;\n"
@@ -128,6 +128,10 @@ std::string make_dts(size_t insns_per_rtc_tick, size_t cpu_hz,
          "  };\n"
          "  htif {\n"
          "    compatible = \"ucb,htif0\";\n"
+         "  };\n"
+	 "  sdhci: mmc {\n"
+         "    compatible = \"nemu-sdhost\";\n"
+	 "		reg = <0x0 0x40002000 0x0 0x1000>;\n"
          "  };\n"
          "};\n";
   return s.str();

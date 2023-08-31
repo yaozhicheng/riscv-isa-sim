@@ -193,4 +193,15 @@ void read_little_endian_reg(T word, reg_t addr, size_t len, uint8_t* bytes)
   }
 }
 
+class sdcard_t : public abstract_device_t {
+  public:
+   sdcard_t(unsigned long size);
+   bool load(reg_t addr, size_t len, uint8_t* bytes);
+   bool store(reg_t addr, size_t len, const uint8_t* bytes);
+   size_t size() { return sz; }
+   void init();
+  private:
+   reg_t sz;
+};
+
 #endif

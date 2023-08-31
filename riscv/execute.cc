@@ -272,9 +272,10 @@ void processor_t::step(size_t n)
           }
 
           // debug mode wfis must nop
-          if (unlikely(in_wfi && !state.debug_mode)) {
+          // for nemu difftest
+          /* if (unlikely(in_wfi && !state.debug_mode)) {
             throw wait_for_interrupt_t();
-          }
+          } */
 
           in_wfi = false;
           insn_fetch_t fetch = mmu->load_insn(pc);
