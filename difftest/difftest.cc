@@ -302,7 +302,7 @@ void difftest_init(int port) {
     // const char *default_varch,
     DEFAULT_VARCH,
     // const bool default_misaligned,
-    false,
+    true,
     // const endianness_t default_endianness,
     endianness_little,
     // const reg_t default_pmpregions,
