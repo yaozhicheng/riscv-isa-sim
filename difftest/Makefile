@@ -22,6 +22,11 @@ INC_LIBS  = $(addprefix $(REPO_PATH)/build/, $(LIB_DEPENDENCIES))
 SRCS = $(shell find . -name '*.cc') $(shell find ./include -name '*.h')
 CXXFLAGS = -O3 --std=c++17 -shared -fPIC
 
+ifneq ($(CONFIG_USE_SPARSEMM),)
+CXXFLAGS += -DCONFIG_USE_SPARSEMM
+$(warning "Use Sparse Ram, when make difftest, plase use: CONFIG_USE_SPARSEMM=1")
+endif
+
 ifneq ($(DEBUG),)
 CONFIGURE_FLAGS += --enable-commitlog
 CXXFLAGS += -DDIFFTEST_LOG_FILE=\"$(NOOP_HOME)/build/spike.log\"

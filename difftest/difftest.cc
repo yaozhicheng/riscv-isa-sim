@@ -3,6 +3,10 @@
 #include "include/dummy_debug.h"
 #include "disasm.h"
 
+#ifdef CONFIG_USE_SPARSEMM
+#include "sparseram.h"
+#endif
+
 static debug_module_config_t difftest_dm_config = {
   .progbufsize = 2,
   .max_sba_data_width = 0,
@@ -137,9 +141,23 @@ void sim_t::diff_set_regs(void* diff_context) {
 
 void sim_t::diff_memcpy(reg_t dest, void* src, size_t n) {
   mmu_t* mmu = p->get_mmu();
+  #ifdef CONFIG_USE_SPARSEMM
+  float dsize = 0;
+  SparseRam *sp_mem = (SparseRam *)src;
+  auto fc = [&](paddr_t addr, size_t len, void* buff){
+    auto n = len;
+    for (size_t i = 0; i < n; i++) {
+      mmu->store_uint8(addr+i, *((uint8_t*)buff+i));
+    }
+    dsize += n;
+  };
+  sp_mem->copy_bytes(fc);
+  printf("[sp-ram] copy data (%.2f kB) from dut complete\n", dsize/1024.0);
+  #else
   for (size_t i = 0; i < n; i++) {
     mmu->store_uint8(dest+i, *((uint8_t*)src+i));
   }
+  #endif
 }
 
 void sim_t::diff_debugmode(void){
